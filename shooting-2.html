@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>シューティングゲーム</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    font-family: 'Courier New', monospace;
+    color: #fff;
+  }
+  #ui {
+    display: flex;
+    gap: 40px;
+    margin-bottom: 10px;
+    font-size: 18px;
+    letter-spacing: 2px;
+  }
+  #ui span { color: #0ff; }
+  canvas {
+    border: 2px solid #ffaa66;
+    box-shadow: 0 0 20px rgba(255,170,102,0.4);
+    background: #000010;
+  }
+  #info {
+    margin-top: 10px;
+    font-size: 13px;
+    color: #888;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div>スコア: <span id="score">0</span></div>
+  <div>レベル: <span id="level">1</span></div>
+  <div>残機: <span id="lives">3</span></div>
+</div>
+<canvas id="game" width="480" height="640"></canvas>
+<div id="info">矢印キー: 移動 &nbsp;|&nbsp; スペース: 射撃</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const scoreEl = document.getElementById('score');
+const levelEl = document.getElementById('level');
+const livesEl = document.getElementById('lives');
+
+let state = 'title'; // title | playing | dead | gameover | clear
+let score = 0, lives = 3, level = 1;
+let frameCount = 0;
+let deadTimer = 0;
+let stars = [];
+let playerScale = 1;
+let totalKills = 0;
+
+const CLEAR_KILLS = 12;
+
+const player = {
+  x: W / 2, y: H - 60,
+  w: 36, h: 36,
+  speed: 5,
+  bullets: [],
+  shootCooldown: 0,
+  invincible: 0,
+};
+
+let enemies = [];
+let enemyBullets = [];
+let explosions = [];
+
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') e.preventDefault();
+  if ((e.code === 'Space' || e.code === 'Enter') && state === 'title') startGame();
+  if ((e.code === 'Space' || e.code === 'Enter') && state === 'gameover') { state = 'title'; }
+  if ((e.code === 'Space' || e.code === 'Enter') && state === 'clear') { state = 'title'; }
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+function initStars() {
+  stars = [];
+  for (let i = 0; i < 80; i++) {
+    stars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.5 + 0.3, speed: Math.random() * 1 + 0.3 });
+  }
+}
+
+function startGame() {
+  score = 0; lives = 3; level = 1; frameCount = 0;
+  playerScale = 1; totalKills = 0;
+  player.x = W / 2; player.y = H - 60;
+  player.w = 36; player.h = 36;
+  player.bullets = []; player.shootCooldown = 0; player.invincible = 0;
+  enemies = []; enemyBullets = []; explosions = [];
+  spawnWave();
+  state = 'playing';
+  updateUI();
+}
+
+function updateUI() {
+  scoreEl.textContent = score;
+  levelEl.textContent = level;
+  livesEl.textContent = lives;
+}
+
+function spawnWave() {
+  const cols = 6, rows = 2 + Math.min(level - 1, 3);
+  const sx = 60, sy = 60, gx = 62, gy = 52;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      enemies.push({
+        x: sx + c * gx, y: sy + r * gy,
+        w: 32, h: 28,
+        hp: 1,
+        type: r === 0 ? 'a' : 'b',
+        dx: 1 + level * 0.3,
+        shootTimer: Math.random() * 120 + 60,
+      });
+    }
+  }
+}
+
+function addExplosion(x, y, color) {
+  const particles = [];
+  for (let i = 0; i < 12; i++) {
+    const angle = (Math.PI * 2 / 12) * i + Math.random() * 0.5;
+    const speed = Math.random() * 3 + 1;
+    particles.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life: 1 });
+  }
+  explosions.push({ particles, color: color || '#ff0', life: 1 });
+}
+
+// ===================== 自機：猫 =====================
+function drawCat(x, y, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha || 1;
+  ctx.translate(x, y);
+  ctx.scale(playerScale, playerScale);
+
+  const col = '#ffaa66';
+  const out = '#cc7733';
+  ctx.shadowColor = col;
+  ctx.shadowBlur = 12;
+
+  // 耳（上向き三角）
+  ctx.fillStyle = col; ctx.strokeStyle = out; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(-12, -12); ctx.lineTo(-6, -26); ctx.lineTo(-1, -12); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(12, -12); ctx.lineTo(6, -26); ctx.lineTo(1, -12); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  // 耳の内側
+  ctx.fillStyle = '#ffd0aa'; ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.moveTo(-10, -13); ctx.lineTo(-6, -22); ctx.lineTo(-3, -13); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(10, -13); ctx.lineTo(6, -22); ctx.lineTo(3, -13); ctx.closePath(); ctx.fill();
+
+  // 頭
+  ctx.fillStyle = col; ctx.strokeStyle = out; ctx.lineWidth = 1.5;
+  ctx.shadowColor = col; ctx.shadowBlur = 10;
+  ctx.beginPath(); ctx.ellipse(0, -8, 14, 12, 0, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+
+  // 胴体
+  ctx.beginPath(); ctx.ellipse(0, 8, 12, 11, 0, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+
+  // 目
+  ctx.shadowBlur = 3; ctx.shadowColor = '#333';
+  ctx.fillStyle = '#333';
+  ctx.beginPath(); ctx.ellipse(-5, -10, 3, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(5, -10, 3, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.arc(-4, -11, 1.2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(6, -11, 1.2, 0, Math.PI * 2); ctx.fill();
+
+  // 鼻
+  ctx.fillStyle = '#f66';
+  ctx.beginPath(); ctx.moveTo(-2, -5); ctx.lineTo(2, -5); ctx.lineTo(0, -3); ctx.closePath(); ctx.fill();
+
+  // ひげ
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.8;
+  ctx.beginPath(); ctx.moveTo(-3, -4); ctx.lineTo(-14, -3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-3, -4); ctx.lineTo(-14, -5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(3, -4); ctx.lineTo(14, -3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(3, -4); ctx.lineTo(14, -5); ctx.stroke();
+
+  // しっぽ
+  ctx.strokeStyle = col; ctx.lineWidth = 3.5; ctx.lineCap = 'round';
+  ctx.shadowColor = col; ctx.shadowBlur = 6;
+  ctx.beginPath(); ctx.moveTo(5, 18); ctx.quadraticCurveTo(20, 22, 16, 10); ctx.stroke();
+
+  ctx.restore();
+}
+
+// ===================== 自弾：ハート（10%大きく） =====================
+function drawHeart(b) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.scale(1.1, 1.1);
+
+  ctx.fillStyle = '#ff69b4';
+  ctx.shadowColor = '#ff69b4';
+  ctx.shadowBlur = 12;
+
+  const s = 7;
+  ctx.beginPath();
+  ctx.moveTo(0, s * 0.9);           // 下の先端
+  ctx.bezierCurveTo(-s * 0.1, s * 0.6, -s * 1.1, s * 0.1, -s * 0.8, -s * 0.4);
+  ctx.bezierCurveTo(-s * 0.6, -s * 0.9, 0, -s * 0.5, 0, -s * 0.15);
+  ctx.bezierCurveTo(0, -s * 0.5, s * 0.6, -s * 0.9, s * 0.8, -s * 0.4);
+  ctx.bezierCurveTo(s * 1.1, s * 0.1, s * 0.1, s * 0.6, 0, s * 0.9);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ===================== 敵弾：人参（10%大きく） =====================
+function drawCarrot(b) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.scale(1.1, 1.1);
+
+  // オレンジの胴体（先端が下）
+  ctx.shadowColor = '#f80';
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = '#f90';
+  ctx.beginPath();
+  ctx.moveTo(0, 10);
+  ctx.lineTo(-4, -5);
+  ctx.lineTo(4, -5);
+  ctx.closePath();
+  ctx.fill();
+
+  // 筋
+  ctx.strokeStyle = '#ffa'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-2, -1); ctx.lineTo(2, -1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-3, 3); ctx.lineTo(3, 3); ctx.stroke();
+
+  // 葉っぱ
+  ctx.fillStyle = '#5c5'; ctx.shadowColor = '#4a4'; ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.ellipse(-4, -10, 2.5, 5.5, -0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(4, -10, 2.5, 5.5, 0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0, -11, 2, 6, 0, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+// ===================== 敵：ウサギ =====================
+function drawRabbit(e) {
+  ctx.save();
+  ctx.translate(e.x, e.y);
+
+  // 耳
+  ctx.fillStyle = '#f0f0f0'; ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.ellipse(-6, -22, 4, 10, -0.15, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(6, -22, 4, 10, 0.15, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#ffb3c1';
+  ctx.beginPath(); ctx.ellipse(-6, -22, 2, 7, -0.15, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(6, -22, 2, 7, 0.15, 0, Math.PI * 2); ctx.fill();
+
+  // 頭
+  ctx.fillStyle = '#f0f0f0'; ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1.5;
+  ctx.shadowColor = '#fff'; ctx.shadowBlur = 6;
+  ctx.beginPath(); ctx.ellipse(0, -8, 11, 10, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  // 胴体
+  ctx.beginPath(); ctx.ellipse(0, 8, 13, 11, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  // 目
+  ctx.shadowBlur = 4; ctx.shadowColor = '#f44'; ctx.fillStyle = '#f44';
+  ctx.beginPath(); ctx.arc(-4, -10, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(4, -10, 2.5, 0, Math.PI * 2); ctx.fill();
+
+  // 鼻
+  ctx.fillStyle = '#ffb3c1'; ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.arc(0, -5, 1.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+// ===================== クリア画面：笑う猫 =====================
+function drawCatFriendly(x, y, scale) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+
+  const col = '#ffaa66'; const out = '#cc7733';
+  ctx.shadowColor = col; ctx.shadowBlur = 8;
+
+  // 耳
+  ctx.fillStyle = col; ctx.strokeStyle = out; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(-12, -20); ctx.lineTo(-6, -34); ctx.lineTo(-1, -20); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(12, -20); ctx.lineTo(6, -34); ctx.lineTo(1, -20); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#ffd0aa'; ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.moveTo(-10, -21); ctx.lineTo(-6, -29); ctx.lineTo(-3, -21); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(10, -21); ctx.lineTo(6, -29); ctx.lineTo(3, -21); ctx.closePath(); ctx.fill();
+
+  // 頭
+  ctx.fillStyle = col; ctx.strokeStyle = out; ctx.lineWidth = 1.5;
+  ctx.shadowColor = col; ctx.shadowBlur = 8;
+  ctx.beginPath(); ctx.ellipse(0, -12, 15, 13, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  // 胴体
+  ctx.beginPath(); ctx.ellipse(0, 8, 13, 14, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  // 笑い目（∩ 形）
+  ctx.shadowBlur = 0; ctx.strokeStyle = '#555'; ctx.lineWidth = 2.2;
+  ctx.beginPath(); ctx.arc(-5, -14, 4.5, Math.PI, 0); ctx.stroke();
+  ctx.beginPath(); ctx.arc(5, -14, 4.5, Math.PI, 0); ctx.stroke();
+
+  // 鼻
+  ctx.fillStyle = '#f66';
+  ctx.beginPath(); ctx.moveTo(-2, -8); ctx.lineTo(2, -8); ctx.lineTo(0, -6); ctx.closePath(); ctx.fill();
+
+  // 笑顔の口
+  ctx.strokeStyle = '#555'; ctx.lineWidth = 1.8;
+  ctx.beginPath(); ctx.arc(0, -6, 4, 0.1, Math.PI - 0.1); ctx.stroke();
+
+  // ひげ
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.8;
+  ctx.beginPath(); ctx.moveTo(-3, -7); ctx.lineTo(-13, -6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(3, -7); ctx.lineTo(13, -6); ctx.stroke();
+
+  // 右手（ウサギ方向へ伸ばす）
+  ctx.strokeStyle = out; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.shadowColor = col; ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.moveTo(12, 2); ctx.lineTo(28, 2); ctx.stroke();
+
+  // 左手
+  ctx.beginPath(); ctx.moveTo(-12, 2); ctx.lineTo(-22, -8); ctx.stroke();
+
+  // しっぽ
+  ctx.strokeStyle = col; ctx.lineWidth = 3.5;
+  ctx.beginPath(); ctx.moveTo(5, 20); ctx.quadraticCurveTo(20, 24, 16, 12); ctx.stroke();
+
+  // 足
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.ellipse(-6, 22, 7, 4, 0.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(6, 22, 7, 4, -0.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  ctx.restore();
+}
+
+// ===================== クリア画面：笑うウサギ =====================
+function drawRabbitFriendly(x, y, scale) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+
+  // 耳
+  ctx.fillStyle = '#f0f0f0'; ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.ellipse(-8, -30, 5, 13, -0.15, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(8, -30, 5, 13, 0.15, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#ffb3c1';
+  ctx.beginPath(); ctx.ellipse(-8, -30, 2.5, 9, -0.15, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(8, -30, 2.5, 9, 0.15, 0, Math.PI * 2); ctx.fill();
+
+  // 頭
+  ctx.fillStyle = '#f0f0f0'; ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1.5;
+  ctx.shadowColor = '#fff'; ctx.shadowBlur = 6;
+  ctx.beginPath(); ctx.ellipse(0, -14, 15, 14, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  // 胴体
+  ctx.beginPath(); ctx.ellipse(0, 10, 17, 20, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  // 笑い目（∩ 形）
+  ctx.shadowBlur = 0; ctx.strokeStyle = '#555'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(-6, -17, 5, Math.PI, 0); ctx.stroke();
+  ctx.beginPath(); ctx.arc(6, -17, 5, Math.PI, 0); ctx.stroke();
+
+  // 笑顔の口
+  ctx.beginPath(); ctx.arc(0, -10, 5, 0.1, Math.PI - 0.1); ctx.stroke();
+
+  // 鼻
+  ctx.fillStyle = '#ffb3c1';
+  ctx.beginPath(); ctx.arc(0, -11, 2, 0, Math.PI * 2); ctx.fill();
+
+  // 左手（猫方向へ伸ばす）
+  ctx.strokeStyle = '#ccc'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.shadowColor = '#f0f0f0'; ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.moveTo(-12, 2); ctx.lineTo(-28, 2); ctx.stroke();
+
+  // 右手
+  ctx.beginPath(); ctx.moveTo(12, 2); ctx.lineTo(22, -8); ctx.stroke();
+
+  // 足
+  ctx.lineWidth = 1.5; ctx.fillStyle = '#f0f0f0';
+  ctx.beginPath(); ctx.ellipse(-8, 28, 9, 5, 0.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(8, 28, 9, 5, -0.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawExplosions() {
+  for (const exp of explosions) {
+    for (const p of exp.particles) {
+      ctx.save();
+      ctx.globalAlpha = p.life;
+      ctx.fillStyle = exp.color;
+      ctx.shadowColor = exp.color;
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3 * p.life, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax - aw/2 < bx + bw/2 && ax + aw/2 > bx - bw/2 &&
+         ay - ah/2 < by + bh/2 && ay + ah/2 > by - bh/2;
+}
+
+// ===================== 更新ループ =====================
+function update() {
+  frameCount++;
+
+  for (const s of stars) {
+    s.y += s.speed;
+    if (s.y > H) s.y = 0;
+  }
+
+  if (state !== 'playing' && state !== 'dead') return;
+
+  if (state === 'dead') {
+    deadTimer--;
+    if (deadTimer <= 0) {
+      if (lives <= 0) { state = 'gameover'; return; }
+      player.x = W / 2; player.y = H - 60;
+      player.bullets = []; player.invincible = 120;
+      enemyBullets = [];
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (keys['ArrowLeft'])  player.x = Math.max(player.w / 2, player.x - player.speed);
+  if (keys['ArrowRight']) player.x = Math.min(W - player.w / 2, player.x + player.speed);
+
+  if (player.shootCooldown > 0) player.shootCooldown--;
+  if (keys['Space'] && player.shootCooldown <= 0) {
+    player.bullets.push({ x: player.x, y: player.y - 20 });
+    player.shootCooldown = 14;
+  }
+
+  for (const b of player.bullets) b.y -= 10;
+  player.bullets = player.bullets.filter(b => b.y > -10);
+
+  if (player.invincible > 0) player.invincible--;
+
+  let hitWall = false;
+  for (const e of enemies) {
+    e.x += e.dx;
+    if (e.x > W - 30 || e.x < 30) hitWall = true;
+  }
+  if (hitWall) {
+    for (const e of enemies) { e.dx *= -1; e.y += 14; }
+  }
+
+  if (enemies.length > 0 && frameCount % Math.max(20, 60 - level * 4) === 0) {
+    const shooter = enemies[Math.floor(Math.random() * enemies.length)];
+    enemyBullets.push({ x: shooter.x, y: shooter.y + 14 });
+  }
+
+  const espeed = 4 + level * 0.5;
+  for (const b of enemyBullets) b.y += espeed;
+  enemyBullets = enemyBullets.filter(b => b.y < H + 10);
+
+  // 自弾 vs 敵
+  outer:
+  for (let i = player.bullets.length - 1; i >= 0; i--) {
+    const b = player.bullets[i];
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (rectsOverlap(b.x, b.y, 6, 16, e.x, e.y, e.w, e.h)) {
+        player.bullets.splice(i, 1);
+        addExplosion(e.x, e.y, '#ffb3c1');
+        enemies.splice(j, 1);
+        score += 10;
+        totalKills++;
+        updateUI();
+        // 12機撃破でゲームクリア
+        if (totalKills >= CLEAR_KILLS) {
+          state = 'clear';
+          return;
+        }
+        continue outer;
+      }
+    }
+  }
+
+  // 敵弾 vs 自機
+  if (player.invincible <= 0) {
+    for (let i = enemyBullets.length - 1; i >= 0; i--) {
+      const b = enemyBullets[i];
+      if (rectsOverlap(b.x, b.y, 6, 16, player.x, player.y, player.w, player.h)) {
+        enemyBullets.splice(i, 1);
+        addExplosion(player.x, player.y, '#ffaa66');
+        lives--;
+        updateUI();
+        state = 'dead';
+        deadTimer = 60;
+        return;
+      }
+    }
+  }
+
+  // 敵が下まで来た
+  for (const e of enemies) {
+    if (e.y > H - 40) {
+      addExplosion(player.x, player.y, '#ffaa66');
+      lives--;
+      updateUI();
+      state = 'dead';
+      deadTimer = 60;
+      return;
+    }
+  }
+
+  // 全敵撃破 → レベルアップ＆自機10%拡大
+  if (enemies.length === 0) {
+    level++;
+    score += 100;
+    playerScale += 0.1;
+    player.w = 36 * playerScale;
+    player.h = 36 * playerScale;
+    enemyBullets = [];
+    player.bullets = [];
+    updateUI();
+    spawnWave();
+  }
+
+  for (const exp of explosions) {
+    exp.life -= 0.04;
+    for (const p of exp.particles) {
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.95; p.vy *= 0.95;
+      p.life -= 0.04;
+    }
+  }
+  explosions = explosions.filter(e => e.life > 0);
+}
+
+// ===================== 描画ループ =====================
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  for (const s of stars) {
+    ctx.fillStyle = `rgba(255,255,255,${s.r * 0.7})`;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // タイトル画面
+  if (state === 'title') {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffaa66';
+    ctx.shadowColor = '#ffaa66';
+    ctx.shadowBlur = 20;
+    ctx.font = 'bold 42px Courier New';
+    ctx.fillText('SPACE SHOOTER', W / 2, H / 2 - 60);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff';
+    ctx.font = '20px Courier New';
+    ctx.fillText('矢印キーで移動', W / 2, H / 2 + 10);
+    ctx.fillText('スペースで射撃', W / 2, H / 2 + 40);
+    ctx.fillStyle = '#ff69b4';
+    ctx.shadowColor = '#ff69b4';
+    ctx.shadowBlur = 10;
+    ctx.font = 'bold 20px Courier New';
+    ctx.fillText(`ウサギを ${CLEAR_KILLS} 匹たおそう！`, W / 2, H / 2 + 75);
+    ctx.font = 'bold 22px Courier New';
+    const blink = Math.floor(frameCount / 30) % 2 === 0;
+    if (blink) ctx.fillText('PRESS SPACE TO START', W / 2, H / 2 + 115);
+    ctx.restore();
+    return;
+  }
+
+  // ゲームオーバー画面
+  if (state === 'gameover') {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f44';
+    ctx.shadowColor = '#f44';
+    ctx.shadowBlur = 20;
+    ctx.font = 'bold 48px Courier New';
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 40);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#ff0';
+    ctx.font = '24px Courier New';
+    ctx.fillText(`スコア: ${score}`, W / 2, H / 2 + 20);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '18px Courier New';
+    ctx.fillText('PRESS SPACE TO RETRY', W / 2, H / 2 + 70);
+    ctx.restore();
+    return;
+  }
+
+  // ゲームクリア画面
+  if (state === 'clear') {
+    ctx.save();
+    ctx.textAlign = 'center';
+
+    // タイトル
+    ctx.fillStyle = '#ff69b4';
+    ctx.shadowColor = '#ff69b4';
+    ctx.shadowBlur = 30;
+    ctx.font = 'bold 52px Courier New';
+    ctx.fillText('GAME CLEAR!', W / 2, 90);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff';
+    ctx.font = '22px Courier New';
+    ctx.fillText(`スコア: ${score}`, W / 2, 135);
+
+    // バウンスアニメーション
+    const bounce = Math.sin(frameCount * 0.09) * 10;
+    const cs = Math.min(playerScale, 1.3);
+    const catX = W / 2 - 60;
+    const rabX = W / 2 + 60;
+    const charY = H / 2 + 10;
+
+    // 猫（左）とウサギ（右）
+    drawCatFriendly(catX, charY + bounce, cs);
+    drawRabbitFriendly(rabX, charY - bounce, cs);
+
+    // 手をつなぐ線（腕の先端から先端へ）
+    const catArmEndX = catX + 28 * cs;
+    const rabArmEndX = rabX - 28 * cs;
+    const armY = charY + 2 * cs;
+    ctx.strokeStyle = '#ffccaa';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = '#ffccaa';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(catArmEndX, armY + bounce * 0.5);
+    ctx.lineTo(rabArmEndX, armY - bounce * 0.5);
+    ctx.stroke();
+
+    // ♡ を中央に
+    ctx.shadowColor = '#ff69b4';
+    ctx.shadowBlur = 15;
+    ctx.font = '28px serif';
+    ctx.fillStyle = '#ff69b4';
+    ctx.fillText('♡', W / 2, armY - bounce * 0.3 - 10);
+
+    // セリフ
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = '#fff';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 30px serif';
+    ctx.fillText('また遊ぼうね！', W / 2, H / 2 + 140);
+
+    // リトライ
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#aaa';
+    ctx.font = '16px Courier New';
+    const blink = Math.floor(frameCount / 30) % 2 === 0;
+    if (blink) ctx.fillText('PRESS SPACE TO RETRY', W / 2, H - 40);
+
+    ctx.restore();
+    return;
+  }
+
+  // ゲーム中
+  for (const e of enemies) drawRabbit(e);
+  for (const b of player.bullets) drawHeart(b);
+  for (const b of enemyBullets) drawCarrot(b);
+  drawExplosions();
+
+  if (state !== 'dead') {
+    const alpha = player.invincible > 0 ? (Math.floor(player.invincible / 6) % 2 === 0 ? 0.3 : 1) : 1;
+    drawCat(player.x, player.y, alpha);
+  }
+
+  // 残り討伐数の表示
+  ctx.save();
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '14px Courier New';
+  ctx.fillText(`あと ${Math.max(0, CLEAR_KILLS - totalKills)} 匹`, W - 10, H - 10);
+  ctx.restore();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+initStars();
+loop();
+</script>
+</body>
+</html>
